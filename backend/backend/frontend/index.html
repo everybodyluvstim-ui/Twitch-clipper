@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VOD Clipper</title>
+<style>
+  :root { --bg:#0e0e10; --card:#18181b; --accent:#9147ff; --text:#efeff1; --sub:#adadb8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, Inter, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:24px; text-align:center; border-bottom:1px solid #2a2a2e; }
+  header h1 { margin:0; font-size:1.6rem; }
+  header p { color:var(--sub); margin:6px 0 0; }
+  .search { display:flex; gap:8px; max-width:520px; margin:24px auto; padding:0 16px; }
+  .search input { flex:1; padding:12px 14px; border-radius:8px; border:1px solid #333; background:#1f1f23; color:var(--text); font-size:1rem; }
+  .search button { padding:12px 20px; border:none; border-radius:8px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  .search button:hover { background:#7c2df0; }
+  #channelHeader { display:flex; align-items:center; gap:12px; max-width:900px; margin:0 auto 16px; padding:0 16px; }
+  #channelHeader img { width:48px; height:48px; border-radius:50%; }
+  .vods, .clips { max-width:900px; margin:0 auto; padding:0 16px 40px; display:grid; gap:14px; }
+  .vod-card, .clip-card { background:var(--card); border:1px solid #2a2a2e; border-radius:10px; padding:14px; display:flex; gap:14px; align-items:center; }
+  .vod-card img { width:160px; border-radius:6px; }
+  .vod-meta { flex:1; }
+  .vod-meta h3 { margin:0 0 6px; font-size:1rem; }
+  .vod-meta span { color:var(--sub); font-size:0.85rem; }
+  .btn { padding:9px 16px; border-radius:8px; border:none; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; white-space:nowrap; }
+  .btn:hover { background:#7c2df0; }
+  .btn:disabled { background:#444; cursor:not-allowed; }
+  .status { font-size:0.85rem; color:var(--sub); margin-top:6px; }
+  .job-panel { max-width:900px; margin:16px auto; padding:16px; background:var(--card); border:1px solid #2a2a2e; border-radius:10px; }
+  .clip-card a { color:var(--accent); font-weight:600; text-decoration:none; }
+  .hidden { display:none; }
+  .error { color:#ff6b6b; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📼 VOD Auto-Clipper</h1>
+  <p>Enter a Twitch channel, pick a VOD, auto-generate highlight clips, download them.</p>
+</header>
+
+<div class="search">
+  <input id="channelInput" placeholder="Twitch channel name (e.g. shroud)" />
+  <button onclick="loadChannel()">Find VODs</button>
+</div>
+
+<div id="channelHeader" class="hidden"></div>
+<div id="vodList" class="vods"></div>
+
+<div id="jobPanel" class="job-panel hidden">
+  <h3 id="jobTitle">Processing…</h3>
+  <div class="status" id="jobStatus">Queued…</div>
+  <div id="clipList" class="clips"></div>
+</div>
+
+<script>
+const API = "";
+
+async function loadChannel() {
+  const login = document.getElementById('channelInput').value.trim();
+  if (!login) return;
+  const vodListEl = document.getElementById('vodList');
+  const headerEl = document.getElementById('channelHeader');
+  vodListEl.innerHTML = '<p>Loading…</p>';
+  headerEl.classList.add('hidden');
+
+  try {
+    const res = await fetch(`${API}/api/channel/${encodeURIComponent(login)}/vods`);
+    if (!res.ok) throw new Error((await res.json()).detail || 'Channel not found');
+    const data = await res.json();
+
+    headerEl.innerHTML = `<img src="${data.avatar}"><h2>${data.channel}</h2>`;
+    headerEl.classList.remove('hidden');
+
+    if (data.vods.length === 0) {
+      vodListEl.innerHTML = '<p>No public VODs found for this channel.</p>';
+      return;
+    }
+
+    vodListEl.innerHTML = data.vods.map(v => `
+      <div class="vod-card">
+        <img src="${v.thumbnail}" alt="">
+        <div class="vod-meta">
+          <h3>${v.title}</h3>
+          <span>${new Date(v.created_at).toLocaleDateString()} • ${v.duration}</span>
+        </div>
+        <button class="btn" onclick="startJob('${v.id}', this)">Generate Clips</button>
+      </div>
+    `).join('');
+  } catch (e) {
+    vodListEl.innerHTML = `<p class="error">${e.message}</p>`;
+  }
+}
+
+async function startJob(vodId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+
+  const res = await fetch(`${API}/api/process`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({vod_id: vodId, max_clips: 8}),
+  });
+  const {job_id} = await res.json();
+
+  const panel = document.getElementById('jobPanel');
+  const statusEl = document.getElementById('jobStatus');
+  const clipListEl = document.getElementById('clipList');
+  panel.classList.remove('hidden');
+  clipListEl.innerHTML = '';
+  document.getElementById('jobTitle').textContent = `Processing VOD ${vodId}`;
+  panel.scrollIntoView({behavior:'smooth'});
+
+  const poll = setInterval(async () => {
+    const r = await fetch(`${API}/api/jobs/${job_id}`);
+    const job = await r.json();
+    statusEl.textContent = describeStatus(job.status);
+
+    if (job.status === 'done') {
+      clearInterval(poll);
+      btn.disabled = false;
+      btn.textContent = 'Generate Clips';
+      clipListEl.innerHTML = job.clips.map(c => `
+        <div class="clip-card">
+          <div class="vod-meta">
+            <h3>Clip ${c.index}</h3>
+            <span>${formatTime(c.start)} → ${formatTime(c.end)} • score ${c.score}</span>
+          </div>
+          <a class="btn" href="${API}${c.download_url}" download>Download</a>
+        </div>
+      `).join('');
+    } else if (job.status === 'error') {
+      clearInterval(poll);
+      btn.disabled = false;
+      btn.textContent = 'Generate Clips';
+      statusEl.innerHTML = `<span class="error">Failed: ${job.error}</span>`;
+    }
+  }, 3000);
+}
+
+function describeStatus(s) {
+  return {
+    queued: 'Queued…',
+    downloading_vod: 'Downloading VOD from Twitch…',
+    downloading_chat: 'Fetching chat replay…',
+    analyzing: 'Analyzing audio & chat for highlights…',
+    clipping: 'Cutting clips…',
+    done: 'Done!',
+  }[s] || s;
+}
+
+function formatTime(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2,'0')}`;
+}
+</script>
+</body>
+</html>
